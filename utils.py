@@ -11,15 +11,20 @@ from pathlib import Path
 import numpy as np
 import ipdb
 
-
 if torch.cuda.is_available():
     device = 'cuda'
     n_gpus = torch.cuda.device_count()
 else:
     device = 'cpu'
 
+from dotenv import load_dotenv
 
-def select_patches_from_loader(loader, batchsize, patch_size, n_patches, n_images, n_patches_per_rowcol, image_channels=1, func=None, seed=0, stride=1):
+load_dotenv()
+
+
+def select_patches_from_loader(loader, batchsize, patch_size, n_patches,
+                               n_images, n_patches_per_rowcol, image_channels=1,
+                               func=None, seed=0, stride=1):
     """
     Returns a randomly selected subset of patches of size (n_patches, image_channels, patch_size, patch_size)
 
@@ -32,7 +37,7 @@ def select_patches_from_loader(loader, batchsize, patch_size, n_patches, n_image
     func=None, seed=args.numpy_seed, stride=1
     """
     np.random.seed(seed)
-    n_patches_per_image = n_patches_per_rowcol**2
+    n_patches_per_image = n_patches_per_rowcol ** 2
     n_patches_total = n_images * n_patches_per_image
 
     # selecting a subset of random patches from all patches.
@@ -40,15 +45,19 @@ def select_patches_from_loader(loader, batchsize, patch_size, n_patches, n_image
     patch_ids = np.random.choice(n_patches_total, size=n_patches, replace=True)
     unique_patch_ids = np.unique(patch_ids)
     while len(unique_patch_ids) < len(patch_ids):
-        unique_patch_ids = np.unique(np.concatenate([unique_patch_ids, np.random.choice(n_patches_total, size=n_patches, replace=True)]))
+        unique_patch_ids = np.unique(np.concatenate([unique_patch_ids,
+                                                     np.random.choice(
+                                                         n_patches_total,
+                                                         size=n_patches,
+                                                         replace=True)]))
     patch_ids = unique_patch_ids[:len(patch_ids)]
 
     # TODO: replace the above with --> patch_ids = np.random.choice(n_patches_total, size=n_patches, replace=False)
 
-
     patch_img_batch_ids = (patch_ids % n_images) // batchsize
 
-    selected_patches = torch.DoubleTensor(n_patches, image_channels, patch_size, patch_size).fill_(0)
+    selected_patches = torch.DoubleTensor(n_patches, image_channels, patch_size,
+                                          patch_size).fill_(0)
 
     for batch_idx, (inputs, _) in enumerate(loader):
         if batch_idx not in patch_img_batch_ids:
@@ -61,17 +70,21 @@ def select_patches_from_loader(loader, batchsize, patch_size, n_patches, n_image
         inputs = inputs.cpu().double()
 
         for batch_patch_id in batch_patch_ids:
-            patch_id  = patch_ids[batch_patch_id]
+            patch_id = patch_ids[batch_patch_id]
             img_id = (patch_id % n_images) % batchsize
             x_id = int(patch_id // n_images % n_patches_per_rowcol)
             y_id = int(patch_id // (n_images * n_patches_per_rowcol))
-            selected_patches[batch_patch_id] = inputs[img_id, :, x_id:x_id+patch_size, y_id:y_id+patch_size]
+            selected_patches[batch_patch_id] = inputs[img_id, :,
+                                               x_id:x_id + patch_size,
+                                               y_id:y_id + patch_size]
 
     return selected_patches
 
-def select_patches_randomly(images, patch_size, n_patches=5000000, seed=0, image_channels=1):
+
+def select_patches_randomly(images, patch_size, n_patches=5000000, seed=0,
+                            image_channels=1):
     np.random.seed(seed)
-    images = images.transpose(0, 3, 1, 2)
+    images = images.transpose(0, 4, 1, 2, 3)
 
     n_patches_per_row = images.shape[2] - patch_size + 1
     n_patches_per_col = images.shape[3] - patch_size + 1
@@ -80,16 +93,23 @@ def select_patches_randomly(images, patch_size, n_patches=5000000, seed=0, image
     patch_ids = np.random.choice(n_patches_total, size=n_patches, replace=True)
     unique_patch_ids = np.unique(patch_ids)
     while len(unique_patch_ids) < len(patch_ids):
-        unique_patch_ids = np.unique(np.concatenate([unique_patch_ids, np.random.choice(n_patches_total, size=n_patches, replace=True)]))
+        unique_patch_ids = np.unique(np.concatenate([unique_patch_ids,
+                                                     np.random.choice(
+                                                         n_patches_total,
+                                                         size=n_patches,
+                                                         replace=True)]))
     patch_ids = unique_patch_ids[:len(patch_ids)]
 
-    patches = np.zeros((n_patches, image_channels, patch_size, patch_size), dtype=images.dtype)
+    patches = np.zeros((n_patches, image_channels, patch_size, patch_size,
+                        images.shape[4]),
+                       dtype=images.dtype)
 
     for i_patch, patch_id in enumerate(patch_ids):
         img_id = patch_id % images.shape[0]
         x_id = patch_id // images.shape[0] % n_patches_per_row
         y_id = patch_id // (images.shape[0] * n_patches_per_row)
-        patches[i_patch] = images[img_id, :, x_id:x_id+patch_size, y_id:y_id+patch_size]
+        patches[i_patch] = images[img_id, :, x_id:x_id + patch_size,
+                           y_id:y_id + patch_size]
 
     return patches
 
@@ -110,7 +130,8 @@ def correct_topk(output, target, topk=(1,)):
     return res
 
 
-def compute_whitening_from_loader(loader, patch_size, seed=0, stride=1, func=None):
+def compute_whitening_from_loader(loader, patch_size, seed=0, stride=1,
+                                  func=None):
     """
     ##################################################################
     ##################### Computing Whitening ########################
@@ -134,36 +155,41 @@ def compute_whitening_from_loader(loader, patch_size, seed=0, stride=1, func=Non
     # compute the mean
     N = 0
     torch.manual_seed(seed)
-    for batch_idx, (inputs, _) in enumerate(loader):
-        inputs, _ = inputs.to(device), _.to(device)
+    for i in loader:
+        print(i)
+    for batch_idx, inputs in enumerate(loader):
+        inputs = inputs.to(device)
         if func is not None:
             inputs = func(inputs)
-        patches = F.unfold(inputs, patch_size, stride=stride).transpose(0, 1).contiguous()  # extracting patches from the whole image
+        patches = F.unfold(inputs, patch_size, stride=stride).transpose(0,
+                                                                        1).contiguous()  # extracting patches from the whole image
         patches = patches.view(patches.size(0), -1)
         n = inputs.size(0)
         batch_mean = patches.mean(dim=1, keepdims=True).double()
         if mean is None:
             mean = batch_mean
         else:
-            mean = N/(N+n)*mean + n/(N+n)*batch_mean
+            mean = N / (N + n) * mean + n / (N + n) * batch_mean
         N += n
 
     mean = mean.float()
     # compute the covariance
     N = 0
     torch.manual_seed(seed)
-    for batch_idx, (inputs, _) in enumerate(loader):
-        inputs, _ = inputs.to(device), _.to(device)
+    for batch_idx, inputs in enumerate(loader):
+        inputs = inputs.to(device)
         if func is not None:
             inputs = func(inputs)
-        patches = F.unfold(inputs, patch_size, stride=stride).transpose(0, 1).contiguous()
+        patches = F.unfold(inputs, patch_size, stride=stride).transpose(0,
+                                                                        1).contiguous()
         patches = patches.view(patches.size(0), -1) - mean
         n = inputs.size(0)
         batch_covariance = (patches @ patches.t() / patches.size(1))
         if covariance is None:
             covariance = batch_covariance.double()
         else:
-            covariance = N/(N+n)*covariance + n/(N+n)*batch_covariance.double()
+            covariance = N / (N + n) * covariance + n / (
+                    N + n) * batch_covariance.double()
         N += n
 
     (eigvals, eigvecs) = scipy.linalg.eigh(covariance.cpu().numpy())
@@ -171,6 +197,7 @@ def compute_whitening_from_loader(loader, patch_size, seed=0, stride=1, func=Non
     mean = mean.view(-1).cpu().numpy().astype('float32')
 
     return (mean, eigvecs, eigvals)
+
 
 def compute_whitening(patches, reg=0.001):
     if (patches.dtype == 'uint8'):
@@ -184,7 +211,7 @@ def compute_whitening(patches, reg=0.001):
 
     patches = patches - patches_mean
 
-    if reg < 0 :
+    if reg < 0:
         return (patches.reshape(orig_shape).astype('float32'),
                 np.eye(patches.shape[1]).astype('float32'),
                 patches_mean.reshape(-1).astype('float32'))
@@ -193,7 +220,7 @@ def compute_whitening(patches, reg=0.001):
 
     (eigvals, eigvecs) = scipy.linalg.eigh(covariance_matrix)
 
-    inv_sqrt_eigvals = np.diag(np.power(eigvals + reg, -1/2))
+    inv_sqrt_eigvals = np.diag(np.power(eigvals + reg, -1 / 2))
 
     whitening_operator = eigvecs.dot(inv_sqrt_eigvals)
 
@@ -210,29 +237,34 @@ def heaviside(x, bias):
 def topk(x, k):
     x_abs = torch.abs(x)
     if x.dtype == torch.float16:
-        return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).half() * x
-    return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).float() * x
+        return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1,
+                                                           keepdim=True).values).half() * x
+    return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1,
+                                                       keepdim=True).values).float() * x
 
 
 def topk_heaviside(x, k):
     if x.dtype == torch.float16:
         # return (x > x.topk(dim=1, k=(k+1)).values.min(dim=1, keepdim=True).values).half()
         # return (x > x.topk(dim=1, k=(k+1)).values[:,-1:,:,:]).half()
-        return (x > x.kthvalue(dim=1, k=k-1, keepdim=True).values).half()
-    return (x > x.topk(dim=1, k=(k+1)).values.min(dim=1, keepdim=True).values).float()
+        return (x > x.kthvalue(dim=1, k=k - 1, keepdim=True).values).half()
+    return (x > x.topk(dim=1, k=(k + 1)).values.min(dim=1,
+                                                    keepdim=True).values).float()
 
 
-def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, batch_norm, classifier1, classifier2, classifier, train=True, relu_after_bottleneck=False):
+def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1,
+                               batch_norm2, batch_norm, classifier1,
+                               classifier2, classifier, train=True,
+                               relu_after_bottleneck=False):
     if args.batch_norm:
         outputs1, outputs2 = batch_norm1(outputs1), batch_norm2(outputs2)
 
-
     if args.convolutional_classifier == 0:
-        outputs1, outputs2 = outputs1.view(outputs1.size(0),-1), outputs2.view(outputs2.size(0),-1)
+        outputs1, outputs2 = outputs1.view(outputs1.size(0), -1), outputs2.view(
+            outputs2.size(0), -1)
 
     outputs1, outputs2 = classifier1(outputs1), classifier2(outputs2)
     outputs = outputs1 + outputs2
-
 
     if args.convolutional_classifier > 0:
         if args.bottleneck_dim > 0:
@@ -253,40 +285,60 @@ def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, b
                 outputs = F.dropout(outputs, p=args.dropout)
         outputs = classifier(outputs)
 
-    outputs = outputs.view(outputs.size(0),-1)
+    outputs = outputs.view(outputs.size(0), -1)
 
     return outputs, targets  # for fdg_uptake_class
     return outputs.float(), targets.float()  # for other metadata
 
 
 def create_classifier_blocks(out1, out2, args, params, n_classes):
-    batch_norm1, batch_norm2, batch_norm, classifier1, classifier2, classifier =  None, None, None, None, None, None
+    batch_norm1, batch_norm2, batch_norm, classifier1, classifier2, classifier = None, None, None, None, None, None
 
     if args.batch_norm:
-        batch_norm1 = nn.BatchNorm2d(out1.size(1), affine=(not args.no_affine_batch_norm)).to(device).float()
-        batch_norm2 = nn.BatchNorm2d(out2.size(1), affine=(not args.no_affine_batch_norm)).to(device).float()
-        params += list(batch_norm1.parameters()) + list(batch_norm2.parameters())
-
+        batch_norm1 = nn.BatchNorm2d(out1.size(1),
+                                     affine=(not args.no_affine_batch_norm)).to(
+            device).float()
+        batch_norm2 = nn.BatchNorm2d(out2.size(1),
+                                     affine=(not args.no_affine_batch_norm)).to(
+            device).float()
+        params += list(batch_norm1.parameters()) + list(
+            batch_norm2.parameters())
 
     if args.convolutional_classifier > 0:
         if args.bottleneck_dim > 0:
-            classifier = nn.Conv2d(args.bottleneck_dim, n_classes, args.convolutional_classifier).to(device).float()
+            classifier = nn.Conv2d(args.bottleneck_dim, n_classes,
+                                   args.convolutional_classifier).to(
+                device).float()
             if args.bn_after_bottleneck:
-                batch_norm = nn.BatchNorm2d(args.bottleneck_dim, affine=(not args.no_affine_batch_norm)).to(device).float()
+                batch_norm = nn.BatchNorm2d(args.bottleneck_dim, affine=(
+                    not args.no_affine_batch_norm)).to(device).float()
                 params += list(batch_norm.parameters())
             params += list(classifier.parameters())
-            classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, args.bottleneck_spatialsize, stride=args.bottleneck_stride).to(device).float()
-            classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, args.bottleneck_spatialsize, stride=args.bottleneck_stride).to(device).float()
+            classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim,
+                                    args.bottleneck_spatialsize,
+                                    stride=args.bottleneck_stride).to(
+                device).float()
+            classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim,
+                                    args.bottleneck_spatialsize,
+                                    stride=args.bottleneck_stride).to(
+                device).float()
         else:
-            classifier1 = nn.Conv2d(out1.size(1), n_classes, args.convolutional_classifier).to(device).float()
-            classifier2 = nn.Conv2d(out2.size(1), n_classes, args.convolutional_classifier).to(device).float()
+            classifier1 = nn.Conv2d(out1.size(1), n_classes,
+                                    args.convolutional_classifier).to(
+                device).float()
+            classifier2 = nn.Conv2d(out2.size(1), n_classes,
+                                    args.convolutional_classifier).to(
+                device).float()
     else:
         out1, out2 = out1.view(out1.size(0), -1), out2.view(out1.size(0), -1)
         if args.bottleneck_dim > 0:
-            classifier = nn.Linear(args.bottleneck_dim, n_classes).to(device).float()
+            classifier = nn.Linear(args.bottleneck_dim, n_classes).to(
+                device).float()
             params += list(classifier.parameters())
-            classifier1 = nn.Linear(out1.size(1), args.bottleneck_dim).to(device).float()
-            classifier2 = nn.Linear(out2.size(1), args.bottleneck_dim).to(device).float()
+            classifier1 = nn.Linear(out1.size(1), args.bottleneck_dim).to(
+                device).float()
+            classifier2 = nn.Linear(out2.size(1), args.bottleneck_dim).to(
+                device).float()
         else:
             classifier1 = nn.Linear(out1.size(1), n_classes).to(device).float()
             classifier2 = nn.Linear(out2.size(1), n_classes).to(device).float()
@@ -297,12 +349,13 @@ def create_classifier_blocks(out1, out2, args, params, n_classes):
 
 
 def compute_channel_mean_and_std(loader, net, n_channel_convolution,
-        kernel_convolution, whitening_operator,
-        minus_whitened_patches_mean, n_epochs=1,
-        seed=0):
-
-    mean1, mean2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(device), torch.DoubleTensor(n_channel_convolution).fill_(0).to(device)
-    std1, std2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(device), torch.DoubleTensor(n_channel_convolution).fill_(0).to(device)
+                                 kernel_convolution, whitening_operator,
+                                 minus_whitened_patches_mean, n_epochs=1,
+                                 seed=0):
+    mean1, mean2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(
+        device), torch.DoubleTensor(n_channel_convolution).fill_(0).to(device)
+    std1, std2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(
+        device), torch.DoubleTensor(n_channel_convolution).fill_(0).to(device)
 
     print(' first pass to compute the mean')
     N = 0
@@ -315,15 +368,21 @@ def compute_channel_mean_and_std(loader, net, n_channel_convolution,
                 if len(kernel_convolution) > 1:
                     outputs = []
                     for i in range(len(kernel_convolution)):
-                        outputs.append(net(inputs, kernel_convolution[i], whitening_operator, minus_whitened_patches_mean))
+                        outputs.append(net(inputs, kernel_convolution[i],
+                                           whitening_operator,
+                                           minus_whitened_patches_mean))
                     outputs1 = torch.cat([out[0] for out in outputs], dim=1)
                     outputs2 = torch.cat([out[1] for out in outputs], dim=1)
                     del outputs
                 else:
-                    outputs1, outputs2 = net(inputs, kernel_convolution[0], whitening_operator, minus_whitened_patches_mean)
+                    outputs1, outputs2 = net(inputs, kernel_convolution[0],
+                                             whitening_operator,
+                                             minus_whitened_patches_mean)
                 n = inputs.size(0)
-                mean1 = N/(N+n) * mean1 + outputs1.mean(dim=(0, 2, 3)).double() * n/(N+n)
-                mean2 = N/(N+n) * mean2 + outputs2.mean(dim=(0, 2, 3)).double() * n/(N+n)
+                mean1 = N / (N + n) * mean1 + outputs1.mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
+                mean2 = N / (N + n) * mean2 + outputs2.mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
                 N += n
 
     mean1 = mean1.view(1, -1, 1, 1)
@@ -339,25 +398,33 @@ def compute_channel_mean_and_std(loader, net, n_channel_convolution,
                 if len(kernel_convolution) > 1:
                     outputs = []
                     for i in range(len(kernel_convolution)):
-                        outputs.append(net(inputs, kernel_convolution[i], whitening_operator, minus_whitened_patches_mean))
+                        outputs.append(net(inputs, kernel_convolution[i],
+                                           whitening_operator,
+                                           minus_whitened_patches_mean))
                     outputs1 = torch.cat([out[0] for out in outputs], dim=1)
                     outputs2 = torch.cat([out[1] for out in outputs], dim=1)
                     del outputs
                 else:
-                    outputs1, outputs2 = net(inputs, kernel_convolution[0], whitening_operator, minus_whitened_patches_mean)
+                    outputs1, outputs2 = net(inputs, kernel_convolution[0],
+                                             whitening_operator,
+                                             minus_whitened_patches_mean)
                 n = inputs.size(0)
-                std1 = N/(N+n) * std1 + ((outputs1 - mean1)**2).mean(dim=(0, 2, 3)).double() * n/(N+n)
-                std2 = N/(N+n) * std2 + ((outputs2 - mean2)**2).mean(dim=(0, 2, 3)).double() * n/(N+n)
+                std1 = N / (N + n) * std1 + ((outputs1 - mean1) ** 2).mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
+                std2 = N / (N + n) * std2 + ((outputs2 - mean2) ** 2).mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
                 N += n
     std1, std2 = torch.sqrt(std1), torch.sqrt(std2)
 
-    return mean1.float(), mean2.float(), std1.float().view(1, -1, 1, 1), std2.float().view(1, -1, 1, 1)
+    return mean1.float(), mean2.float(), std1.float().view(1, -1, 1,
+                                                           1), std2.float().view(
+        1, -1, 1, 1)
 
 
 def conv3x3(in_planes, out_planes, stride=1):
     "3x3 convolution with padding"
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                    padding=1, bias=False)
+                     padding=1, bias=False)
 
 
 class BasicBlock(nn.Module):
@@ -398,7 +465,8 @@ class ResNet(nn.Module):
         self.K = in_channels
         self.init_conv = nn.Sequential(
             nn.BatchNorm2d(in_channels, eps=1e-5, affine=False),
-            nn.Conv2d(in_channels, self.ichannels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(in_channels, self.ichannels, kernel_size=3, stride=1,
+                      padding=1, bias=False),
             nn.BatchNorm2d(self.ichannels),
             nn.ReLU(True)
         )
@@ -413,7 +481,7 @@ class ResNet(nn.Module):
         if stride != 1 or self.inplanes != planes:
             downsample = nn.Sequential(
                 nn.Conv2d(self.inplanes, planes,
-                kernel_size=1, stride=stride, bias=False),
+                          kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(planes),
             )
         layers = []
@@ -437,14 +505,16 @@ class ResNet(nn.Module):
 
 def eval_L_rbf(X, Y=None, sig=5.):
     X = np.atleast_2d(X)
-    X_norm_sq = np.linalg.norm(X, axis=1)**2
+    X_norm_sq = np.linalg.norm(X, axis=1) ** 2
     if Y is None:
-        pairwise_distance_sq = X_norm_sq[:, np.newaxis] - 2*X.dot(X.T) + X_norm_sq[np.newaxis,:]
+        pairwise_distance_sq = X_norm_sq[:, np.newaxis] - 2 * X.dot(
+            X.T) + X_norm_sq[np.newaxis, :]
     else:
         Y = np.atleast_2d(Y)
-        Y_norm_sq = np.linalg.norm(Y, axis=1)**2
-        pairwise_distance_sq = X_norm_sq[:, np.newaxis] - 2*X.dot(Y.T) + Y_norm_sq[np.newaxis,:]
-    return np.exp(-pairwise_distance_sq / sig**2)
+        Y_norm_sq = np.linalg.norm(Y, axis=1) ** 2
+        pairwise_distance_sq = X_norm_sq[:, np.newaxis] - 2 * X.dot(
+            Y.T) + Y_norm_sq[np.newaxis, :]
+    return np.exp(-pairwise_distance_sq / sig ** 2)
 
 
 def compute_features(loader, net, args, flip=False):
@@ -455,8 +525,11 @@ def compute_features(loader, net, args, flip=False):
                 inputs = inputs.half()
             if args.batchsize_net > 0:
                 outputs = []
-                for i in range(np.ceil(inputs.size(0)/args.batchsize_net).astype('int')):
-                    start, end = i*args.batchsize_net, min((i+1)*args.batchsize_net, inputs.size(0))
+                for i in range(
+                        np.ceil(inputs.size(0) / args.batchsize_net).astype(
+                            'int')):
+                    start, end = i * args.batchsize_net, min(
+                        (i + 1) * args.batchsize_net, inputs.size(0))
                     inputs_batch = inputs[start:end].to(device)
                     outputs.append(net(inputs_batch))
                 outputs1 = torch.cat([out[0] for out in outputs], dim=0)
@@ -466,16 +539,15 @@ def compute_features(loader, net, args, flip=False):
                 outputs1, outputs2 = net(inputs)
             outputs1, outputs2 = outputs1.float(), outputs2.float()
             feats = torch.cat([
-                    outputs1.reshape((outputs1.size(0), -1)), outputs2.reshape((outputs1.size(0), -1))
-                ], dim=1).cpu().numpy()
+                outputs1.reshape((outputs1.size(0), -1)),
+                outputs2.reshape((outputs1.size(0), -1))
+            ], dim=1).cpu().numpy()
             features.append(feats)
             labels.append(targets.cpu().numpy())
     return np.concatenate(features, axis=0), np.concatenate(labels, axis=0)
 
 
-
 def calculate_HRank(outputs1, outputs2, targets):
-
     # get ranks of feature maps
     batch_item_idx_for_label = {}
     avg_batch_rank_per_label = {}
@@ -516,7 +588,8 @@ def save_rank_statistics(feature_maps_rank_per_batch, net):
     N = len(unique_classes)
     fig1, ax1 = plt.subplots(2, 2)
     for idx, c in enumerate(unique_classes):
-        ax1[idx//2, idx%2].imshow(pos_filters[c], interpolation='nearest', aspect='auto')
+        ax1[idx // 2, idx % 2].imshow(pos_filters[c], interpolation='nearest',
+                                      aspect='auto')
 
     plt.savefig(f"./figures/pos_filter_rank_statistic.png")
 
@@ -525,7 +598,8 @@ def save_rank_statistics(feature_maps_rank_per_batch, net):
     plt.cla()
     fig2, ax2 = plt.subplots(2, 2)
     for c in unique_classes:
-        ax2[c//2, c%2].imshow(neg_filters[c], interpolation='nearest', aspect='auto')
+        ax2[c // 2, c % 2].imshow(neg_filters[c], interpolation='nearest',
+                                  aspect='auto')
 
     plt.savefig(f"./figures/neg_filter_rank_statistic.png")
 
@@ -545,30 +619,40 @@ def save_rank_statistics(feature_maps_rank_per_batch, net):
         pos_difference = pos_difference[:, sorted_pos_idx]
         neg_difference = neg_difference[:, sorted_neg_idx]
 
-    im0 = ax3[0].imshow(pos_difference, interpolation='nearest', aspect='auto', cmap='viridis')
+    im0 = ax3[0].imshow(pos_difference, interpolation='nearest', aspect='auto',
+                        cmap='viridis')
     plt.colorbar(im0, ax=ax3[0])
 
-    im1 = ax3[1].imshow(neg_difference, interpolation='nearest', aspect='auto', cmap='viridis')
+    im1 = ax3[1].imshow(neg_difference, interpolation='nearest', aspect='auto',
+                        cmap='viridis')
     plt.colorbar(im1, ax=ax3[1])
 
     plt.savefig(f"./figures/difference_rank_statistic.png")
 
     # show filters active in passive regions and active regions
-    pos_filters_for_active_regions = sorted_pos_idx[pos_difference.mean(0) > 3.2]
-    pos_filters_for_passive_regions = sorted_pos_idx[pos_difference.mean(0) < -1]
+    pos_filters_for_active_regions = sorted_pos_idx[
+        pos_difference.mean(0) > 3.2]
+    pos_filters_for_passive_regions = sorted_pos_idx[
+        pos_difference.mean(0) < -1]
 
-    neg_filters_for_active_regions = sorted_neg_idx[neg_difference.mean(0) > 3.2]
-    neg_filters_for_passive_regions = sorted_neg_idx[neg_difference.mean(0) < -2.5]
+    neg_filters_for_active_regions = sorted_neg_idx[
+        neg_difference.mean(0) > 3.2]
+    neg_filters_for_passive_regions = sorted_neg_idx[
+        neg_difference.mean(0) < -2.5]
 
     # display random 25 for each combination
     plt.cla()
     plt.clf()
     fig, ax = plt.subplots(2, 2)
 
-    pos_filters_for_active_regions = net.kernel_convolution[np.random.choice(pos_filters_for_active_regions, 25)]
-    pos_filters_for_passive_regions = net.kernel_convolution[np.random.choice(pos_filters_for_passive_regions, 25)]
-    neg_filters_for_active_regions = net.kernel_convolution[np.random.choice(neg_filters_for_active_regions, 25)]
-    neg_filters_for_passive_regions = net.kernel_convolution[np.random.choice(neg_filters_for_passive_regions, 25)]
+    pos_filters_for_active_regions = net.kernel_convolution[
+        np.random.choice(pos_filters_for_active_regions, 25)]
+    pos_filters_for_passive_regions = net.kernel_convolution[
+        np.random.choice(pos_filters_for_passive_regions, 25)]
+    neg_filters_for_active_regions = net.kernel_convolution[
+        np.random.choice(neg_filters_for_active_regions, 25)]
+    neg_filters_for_passive_regions = net.kernel_convolution[
+        np.random.choice(neg_filters_for_passive_regions, 25)]
 
     all_filters = [pos_filters_for_active_regions,
                    pos_filters_for_passive_regions,
@@ -581,33 +665,30 @@ def save_rank_statistics(feature_maps_rank_per_batch, net):
         f = torch.squeeze(f)
         for i in range(25):
             # data *= min(f[i].cpu().numpy().reshape(-1))
-            data[i//5*4 + i//5: i//5*4 + 4 + i//5,
-                 i%5*4 + i%5: i%5*4 + 4 + i%5] = f[i].cpu()
+            data[i // 5 * 4 + i // 5: i // 5 * 4 + 4 + i // 5,
+            i % 5 * 4 + i % 5: i % 5 * 4 + 4 + i % 5] = f[i].cpu()
         return data
 
     for idx, fil in enumerate(all_filters):
         concatenated_filter = get_concatenated_filter(fil)
-        ax[idx//2, idx%2].imshow(concatenated_filter, interpolation='nearest', aspect='auto')
+        ax[idx // 2, idx % 2].imshow(concatenated_filter,
+                                     interpolation='nearest', aspect='auto')
 
     plt.savefig("./figures/sample_filters.png")
 
 
-
-
-
-
-#%%
+# %%
 class FileObject(object):
     def __init__(
-        self,
-        config_file={"split_parts": {},
-                     "use_file": {"file_part": 2},
-                     "plot_fdg_uptake": {},
-                     "remove_lipids": {},
-                     "imputation": {"name": "imputation_1"},
-                    },
-        dir_path=Path(os.getenv("OMICS_DATA")),
-        file_name="ERC15_Metabolomi_data.csv",
+            self,
+            config_file={"split_parts": {},
+                         "use_file": {"file_part": 2},
+                         "plot_fdg_uptake": {},
+                         "remove_lipids": {},
+                         "imputation": {"name": "imputation_1"},
+                         },
+            dir_path=Path(os.getenv("OMICS_DATA")),
+            file_name="ERC15_Metabolomi_data.csv",
     ):
         self.df = pd.read_csv(dir_path / file_name, header=None)
         self.files: list
@@ -639,20 +720,22 @@ class FileObject(object):
         if update_all_versions:
             self.files[1] = self.files[1][
                 self.files[1]["C: Metabo.Class"] != "acylcarnitines"
-            ]
+                ]
             self.files[1] = self.files[1][
                 self.files[1]["C: Metabo.Class"] != "glycerophospholipids"
-            ]
+                ]
             self.files[1] = self.files[1][
                 self.files[1]["C: Metabo.Class"] != "sphingolipids"
-            ]
+                ]
             self.file = self.files[1]
         else:
-            self.file = self.file[self.file["C: Metabo.Class"] != "acylcarnitines"]
+            self.file = self.file[
+                self.file["C: Metabo.Class"] != "acylcarnitines"]
             self.file = self.file[
                 self.file["C: Metabo.Class"] != "glycerophospholipids"
-            ]
-            self.file = self.file[self.file["C: Metabo.Class"] != "sphingolipids"]
+                ]
+            self.file = self.file[
+                self.file["C: Metabo.Class"] != "sphingolipids"]
 
     def imputation_1(self):
         """
@@ -664,13 +747,15 @@ class FileObject(object):
         """
         self.file.drop(columns=["C: Metabo.Class"], inplace=True)
         self.file = self.file.apply(pd.to_numeric)
-        self.file = self.file[(self.file.T != 0).any()]  # dropping rows with all zeros
+        self.file = self.file[
+            (self.file.T != 0).any()]  # dropping rows with all zeros
         imputation_dict = {}
         for c in self.file.columns:  # iterating through the columns
             min_value = (
                 self.file[c].drop_duplicates().nsmallest(2).iloc[-1]
             )  # column min (after 0)
-            imputation_dict[c] = {0: min_value / 2}  # replace 0 with min_value/2
+            imputation_dict[c] = {
+                0: min_value / 2}  # replace 0 with min_value/2
 
         self.file = self.file.replace(imputation_dict)
 
@@ -718,7 +803,8 @@ class FileObject(object):
                 ),  # this is the point to label
                 textcoords="offset points",  # how to position the text
                 xytext=(0, 5),  # distance from text to points (x,y)
-                ha="center",  # horizontal alignment can be left, right or center
+                ha="center",
+                # horizontal alignment can be left, right or center
                 fontsize=5,
             )
 
@@ -731,7 +817,8 @@ class FileObject(object):
                     ),  # this is the point to label
                     textcoords="offset points",  # how to position the text
                     xytext=(0, -2),  # distance from text to points (x,y)
-                    ha="center",  # horizontal alignment can be left, right or center
+                    ha="center",
+                    # horizontal alignment can be left, right or center
                     fontsize=5,
                 )
 
@@ -761,5 +848,3 @@ class FileObject(object):
             map(modified_class_dict.get, classes)
         )  # FDG uptake classification
         self.classes = classes
-
-

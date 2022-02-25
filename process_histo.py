@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from torchvision.datasets import CIFAR10
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
-from dtd import Dataloder
+from dtd import Dataloder, DataloderClustering
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -31,7 +31,150 @@ import utils
 from pathlib import Path
 import csv
 
-print('kneighbors.py')
+
+################################################################################
+# HELPER FUNCTIONS.
+################################################################################
+def lowestk_heaviside(x, k):
+    if x.dtype == torch.float16:
+        return (x < x.kthvalue(dim=1, k=k + 1, keepdim=True).values).half()
+    return (x < x.kthvalue(dim=1, k=k + 1, keepdim=True).values).float()
+
+
+def lowestk_sigmoid(x, k, sigmoid):
+    if x.dtype == torch.float16:
+        return torch.sigmoid((x.kthvalue(dim=1, k=k + 1,
+                                         keepdim=True).values - x) / sigmoid).half()
+    return torch.sigmoid(
+        (x.kthvalue(dim=1, k=k + 1, keepdim=True).values - x) / sigmoid).float()
+
+
+def compute_channel_mean_and_std(loader, net, n_channel_convolution,
+                                 kernel_convolution, bias_convolution,
+                                 n_epochs=1, seed=0):
+    mean1, mean2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(
+        device), torch.DoubleTensor(
+        n_channel_convolution).fill_(0).to(device)
+    std1, std2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(
+        device), torch.DoubleTensor(
+        n_channel_convolution).fill_(0).to(device)
+
+    print('First pass to compute the mean')
+    N = 0
+    torch.manual_seed(seed)
+    with torch.no_grad():
+        for i_epoch in range(n_epochs):
+            for batch_idx, (inputs, _) in enumerate(loader):
+                if torch.cuda.is_available():
+                    inputs = inputs.half()  # converting to 16 bit float
+                if args.batchsize_net > 0:
+                    outputs = []
+                    for i in range(
+                            np.ceil(inputs.size(0) / args.batchsize_net).astype(
+                                'int')):
+                        start, end = i * args.batchsize_net, min(
+                            (i + 1) * args.batchsize_net, inputs.size(0))
+                        inputs_batch = inputs[start:end].to(device)
+                        outputs.append(net(inputs_batch))
+                    outputs1 = torch.cat([out[0] for out in outputs], dim=0)
+                    outputs2 = torch.cat([out[1] for out in outputs], dim=0)
+                else:
+                    inputs = inputs.to(device)
+                    outputs1, outputs2 = net(inputs)
+                outputs1, outputs2 = outputs1.float(), outputs2.float()
+                n = inputs.size(0)
+                mean1 = N / (N + n) * mean1 + outputs1.mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
+                mean2 = N / (N + n) * mean2 + outputs2.mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
+                N += n
+
+    mean1 = mean1.view(1, -1, 1, 1).float()
+    mean2 = mean2.view(1, -1, 1, 1).float()
+    print('Second pass to compute the std')
+    N = 0
+    torch.manual_seed(seed)
+    with torch.no_grad():
+        for i_epoch in range(n_epochs):
+            for batch_idx, (inputs, _) in enumerate(loader):
+                if torch.cuda.is_available():
+                    inputs = inputs.half()
+                if args.batchsize_net > 0:
+                    outputs = []
+                    for i in range(
+                            np.ceil(inputs.size(0) / args.batchsize_net).astype(
+                                'int')):
+                        start, end = i * args.batchsize_net, min(
+                            (i + 1) * args.batchsize_net, inputs.size(0))
+                        inputs_batch = inputs[start:end].to(device)
+                        outputs.append(net(inputs_batch))
+                    outputs1 = torch.cat([out[0] for out in outputs], dim=0)
+                    outputs2 = torch.cat([out[1] for out in outputs], dim=0)
+                else:
+                    inputs = inputs.to(device)
+                    outputs1, outputs2 = net(inputs)
+                outputs1, outputs2 = outputs1.float(), outputs2.float()
+                n = inputs.size(0)
+                std1 = N / (N + n) * std1 + ((outputs1 - mean1) ** 2).mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
+                std2 = N / (N + n) * std2 + ((outputs2 - mean2) ** 2).mean(
+                    dim=(0, 2, 3)).double() * n / (N + n)
+                N += n
+
+    std1, std2 = torch.sqrt(std1), torch.sqrt(std2)
+
+    return mean1, mean2, std1.float().view(1, -1, 1, 1), std2.float().view(1,
+                                                                           -1,
+                                                                           1, 1)
+
+
+class Net(nn.Module):
+    def __init__(self, kernel_convolution, bias_convolution,
+                 spatialsize_avg_pooling, stride_avg_pooling,
+                 finalsize_avg_pooling, k_neighbors=1, sigmoid=0.):
+        super(Net, self).__init__()
+        self.kernel_convolution = nn.Parameter(kernel_convolution,
+                                               requires_grad=False)
+        self.bias_convolution = nn.Parameter(bias_convolution,
+                                             requires_grad=False)
+        self.pool_size = spatialsize_avg_pooling
+        self.pool_stride = stride_avg_pooling
+        self.finalsize_avg_pooling = finalsize_avg_pooling
+        self.k_neighbors = k_neighbors
+        self.sigmoid = sigmoid
+
+    def forward(self, x):
+        print(x.size())
+        print(self.kernel_convolution.size())
+        out = F.conv2d(x, self.kernel_convolution)
+
+        if self.sigmoid > 0:
+            out1 = lowestk_sigmoid(-out + self.bias_convolution,
+                                   self.k_neighbors, self.sigmoid)
+        else:
+            out1 = lowestk_heaviside(-out + self.bias_convolution,
+                                     self.k_neighbors)
+        out1 = F.avg_pool2d(out1, self.pool_size, stride=self.pool_stride,
+                            ceil_mode=True)
+        if self.finalsize_avg_pooling > 0:
+            out1 = F.adaptive_avg_pool2d(out1, self.finalsize_avg_pooling)
+        if self.sigmoid > 0:
+            out2 = lowestk_sigmoid(out + self.bias_convolution,
+                                   self.k_neighbors, self.sigmoid)
+        else:
+            out2 = lowestk_heaviside(out + self.bias_convolution,
+                                     self.k_neighbors)
+        out2 = F.avg_pool2d(out2, self.pool_size, stride=self.pool_stride,
+                            ceil_mode=True)
+        if self.finalsize_avg_pooling > 0:
+            out2 = F.adaptive_avg_pool2d(out2, self.finalsize_avg_pooling)
+        return out1, out2  # negative and positive convolutions so that the model is sign invariant
+
+
+################################################################################
+# PARSER.
+################################################################################
+
 parser = argparse.ArgumentParser(
     'linear classification using patches k nearest neighbors indicators for euclidean metric')
 
@@ -42,7 +185,7 @@ parser.add_argument('--task_name', help="the training task",
                     default='histology', type=str)
 
 # parameters for the patches
-parser.add_argument('--dataset', help="cifar10/?", default='cifar10')
+parser.add_argument('--dataset', help="histology/?", default='histology')
 parser.add_argument('--no_padding', action='store_true', help='no padding used')
 parser.add_argument('--patches_file', help=".t7 file containing patches",
                     default='')
@@ -174,258 +317,15 @@ np.random.seed(args.numpy_seed)
 
 train_sampler = None
 
-# Define the dataset
-if args.dataset == 'cifar10':
-    spatial_size = 32
-    padding = 0 if args.no_padding else 4
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(spatial_size, padding=padding),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ])
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ])
-    trainset = CIFAR10(root='./data', train=True, download=True,
-                       transform=transform_train)
-    trainloader = torch.utils.data.DataLoader(trainset,
-                                              batch_size=args.batchsize,
-                                              shuffle=True,
-                                              num_workers=args.num_workers)
-    n_classes = 10
-
-    testset = CIFAR10(root='./data', train=False, download=True,
-                      transform=transform_test)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=args.batchsize,
-                                             shuffle=False,
-                                             num_workers=args.num_workers)
-elif args.dataset in ['imagenet32', 'imagenet64', 'imagenet128']:
-
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-
-    n_arrays_train = 10
-    padding = 4
-    spatial_size = 32
-    if args.dataset == 'imagenet64':
-        spatial_size = 64
-        padding = 8
-    if args.dataset == 'imagenet128':
-        spatial_size = 128
-        padding = 16
-        n_arrays_train = 100
-    n_classes = 1000
-
-    if args.no_padding:
-        padding = 0
-
-    transforms_train = [
-        transforms.RandomCrop(spatial_size, padding=padding,
-                              padding_mode=args.padding_mode),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize,
-    ]
-    transforms_test = [transforms.ToTensor(), normalize]
-
-    trainset = Imagenet32(args.path_train,
-                          transform=transforms.Compose(transforms_train),
-                          sz=spatial_size,
-                          n_arrays=n_arrays_train)
-    testset = Imagenet32(args.path_test,
-                         transform=transforms.Compose(transforms_test),
-                         sz=spatial_size)
-
-    trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=args.batchsize, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True)
-    testloader = torch.utils.data.DataLoader(
-        testset,
-        batch_size=args.batchsize, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True)
-    n_classes = 1000
-
-# WIP
-elif args.dataset in ['imagenet']:
-    spatial_size = 64
-    traindir = os.path.join(args.path, 'train')
-    valdir = os.path.join(args.path, 'val')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-
-    trainset = datasets.ImageFolder(
-        traindir,
-        transforms.Compose([
-            # MODIF
-            # transforms.RandomResizedCrop(64),
-            transforms.Resize(72),
-            transforms.RandomCrop(64),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]))
-    trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=128, shuffle=True,
-        num_workers=8, pin_memory=True)
-    testset = datasets.ImageFolder(valdir, transforms.Compose([
-        # MODIF
-        # transforms.Resize(64),
-        transforms.Resize(72),
-        transforms.CenterCrop(64),
-        transforms.ToTensor(),
-        normalize,
-    ]))
-    testloader = torch.utils.data.DataLoader(
-        testset,
-        batch_size=args.batchsize, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True)
-    n_classes = 1000
-elif args.dataset == 'DTD':
+if args.dataset == 'histology':
     spatial_size = 20
-    classes, trainset, testset, trainloader, testloader, trainloader_norandom = Dataloder(
-        args.path_train,
+    trainset, trainloader, trainloader_norandom = DataloderClustering(
+        path=args.path_train,
         spatial_size=spatial_size,
         batchsize=args.batchsize,
-        skip_mouse_id=args.skip_mouse_id,
         task_name=args.task_name).getloader()
-    n_classes = len(classes)
-
-
-def lowestk_heaviside(x, k):
-    if x.dtype == torch.float16:
-        return (x < x.kthvalue(dim=1, k=k + 1, keepdim=True).values).half()
-    return (x < x.kthvalue(dim=1, k=k + 1, keepdim=True).values).float()
-
-
-def lowestk_sigmoid(x, k, sigmoid):
-    if x.dtype == torch.float16:
-        return torch.sigmoid((x.kthvalue(dim=1, k=k + 1,
-                                         keepdim=True).values - x) / sigmoid).half()
-    return torch.sigmoid(
-        (x.kthvalue(dim=1, k=k + 1, keepdim=True).values - x) / sigmoid).float()
-
-
-def compute_channel_mean_and_std(loader, net, n_channel_convolution,
-                                 kernel_convolution, bias_convolution,
-                                 n_epochs=1, seed=0):
-    mean1, mean2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(
-        device), torch.DoubleTensor(
-        n_channel_convolution).fill_(0).to(device)
-    std1, std2 = torch.DoubleTensor(n_channel_convolution).fill_(0).to(
-        device), torch.DoubleTensor(
-        n_channel_convolution).fill_(0).to(device)
-
-    print('First pass to compute the mean')
-    N = 0
-    torch.manual_seed(seed)
-    with torch.no_grad():
-        for i_epoch in range(n_epochs):
-            for batch_idx, (inputs, _) in enumerate(loader):
-                if torch.cuda.is_available():
-                    inputs = inputs.half()  # converting to 16 bit float
-                if args.batchsize_net > 0:
-                    outputs = []
-                    for i in range(
-                            np.ceil(inputs.size(0) / args.batchsize_net).astype(
-                                'int')):
-                        start, end = i * args.batchsize_net, min(
-                            (i + 1) * args.batchsize_net, inputs.size(0))
-                        inputs_batch = inputs[start:end].to(device)
-                        outputs.append(net(inputs_batch))
-                    outputs1 = torch.cat([out[0] for out in outputs], dim=0)
-                    outputs2 = torch.cat([out[1] for out in outputs], dim=0)
-                else:
-                    inputs = inputs.to(device)
-                    outputs1, outputs2 = net(inputs)
-                outputs1, outputs2 = outputs1.float(), outputs2.float()
-                n = inputs.size(0)
-                mean1 = N / (N + n) * mean1 + outputs1.mean(
-                    dim=(0, 2, 3)).double() * n / (N + n)
-                mean2 = N / (N + n) * mean2 + outputs2.mean(
-                    dim=(0, 2, 3)).double() * n / (N + n)
-                N += n
-
-    mean1 = mean1.view(1, -1, 1, 1).float()
-    mean2 = mean2.view(1, -1, 1, 1).float()
-    print('Second pass to compute the std')
-    N = 0
-    torch.manual_seed(seed)
-    with torch.no_grad():
-        for i_epoch in range(n_epochs):
-            for batch_idx, (inputs, _) in enumerate(loader):
-                if torch.cuda.is_available():
-                    inputs = inputs.half()
-                if args.batchsize_net > 0:
-                    outputs = []
-                    for i in range(
-                            np.ceil(inputs.size(0) / args.batchsize_net).astype(
-                                'int')):
-                        start, end = i * args.batchsize_net, min(
-                            (i + 1) * args.batchsize_net, inputs.size(0))
-                        inputs_batch = inputs[start:end].to(device)
-                        outputs.append(net(inputs_batch))
-                    outputs1 = torch.cat([out[0] for out in outputs], dim=0)
-                    outputs2 = torch.cat([out[1] for out in outputs], dim=0)
-                else:
-                    inputs = inputs.to(device)
-                    outputs1, outputs2 = net(inputs)
-                outputs1, outputs2 = outputs1.float(), outputs2.float()
-                n = inputs.size(0)
-                std1 = N / (N + n) * std1 + ((outputs1 - mean1) ** 2).mean(
-                    dim=(0, 2, 3)).double() * n / (N + n)
-                std2 = N / (N + n) * std2 + ((outputs2 - mean2) ** 2).mean(
-                    dim=(0, 2, 3)).double() * n / (N + n)
-                N += n
-
-    std1, std2 = torch.sqrt(std1), torch.sqrt(std2)
-
-    return mean1, mean2, std1.float().view(1, -1, 1, 1), std2.float().view(1,
-                                                                           -1,
-                                                                           1, 1)
-
-
-class Net(nn.Module):
-    def __init__(self, kernel_convolution, bias_convolution,
-                 spatialsize_avg_pooling, stride_avg_pooling,
-                 finalsize_avg_pooling, k_neighbors=1, sigmoid=0.):
-        super(Net, self).__init__()
-        self.kernel_convolution = nn.Parameter(kernel_convolution,
-                                               requires_grad=False)
-        self.bias_convolution = nn.Parameter(bias_convolution,
-                                             requires_grad=False)
-        self.pool_size = spatialsize_avg_pooling
-        self.pool_stride = stride_avg_pooling
-        self.finalsize_avg_pooling = finalsize_avg_pooling
-        self.k_neighbors = k_neighbors
-        self.sigmoid = sigmoid
-
-    def forward(self, x):
-        out = F.conv2d(x, self.kernel_convolution)
-
-        if self.sigmoid > 0:
-            out1 = lowestk_sigmoid(-out + self.bias_convolution,
-                                   self.k_neighbors, self.sigmoid)
-        else:
-            out1 = lowestk_heaviside(-out + self.bias_convolution,
-                                     self.k_neighbors)
-        out1 = F.avg_pool2d(out1, self.pool_size, stride=self.pool_stride,
-                            ceil_mode=True)
-        if self.finalsize_avg_pooling > 0:
-            out1 = F.adaptive_avg_pool2d(out1, self.finalsize_avg_pooling)
-        if self.sigmoid > 0:
-            out2 = lowestk_sigmoid(out + self.bias_convolution,
-                                   self.k_neighbors, self.sigmoid)
-        else:
-            out2 = lowestk_heaviside(out + self.bias_convolution,
-                                     self.k_neighbors)
-        out2 = F.avg_pool2d(out2, self.pool_size, stride=self.pool_stride,
-                            ceil_mode=True)
-        if self.finalsize_avg_pooling > 0:
-            out2 = F.adaptive_avg_pool2d(out2, self.finalsize_avg_pooling)
-        return out1, out2  # negative and positive convolutions so that the model is sign invariant
-
+else:
+    raise ValueError("Only histology allowed as dataset.")
 
 """
 ##################################################################
@@ -451,48 +351,12 @@ if not os.path.exists(whitening_file):
 
     print('Computing whitening...')
 
-    if args.dataset == 'cifar10':
-        trainset_whitening = CIFAR10(root='./data', train=True, download=True,
-                                     transform=transforms.ToTensor())
-        trainloader_whitening = torch.utils.data.DataLoader(trainset_whitening,
-                                                            batch_size=1000,
-                                                            shuffle=False,
-                                                            num_workers=args.num_workers)
-        stride = 1
-
-    elif args.dataset in ['imagenet32', 'imagenet64', 'imagenet128']:
-        stride = 2
-        trainset_whitening = Imagenet32(args.path_train,
-                                        transform=transforms.ToTensor(),
-                                        sz=spatial_size,
-                                        n_arrays=n_arrays_train)
-        trainloader_whitening = torch.utils.data.DataLoader(
-            trainset_whitening, batch_size=100, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True)
-
-    elif args.dataset in ['imagenet']:
-        stride = 2
-        spatial_size = 64
-        traindir = os.path.join(args.path, 'train')
-        valdir = os.path.join(args.path, 'val')
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-
-        trainset_whitening = datasets.ImageFolder(
-            traindir,
-            transforms.Compose([
-                transforms.Resize(72),
-                transforms.CenterCrop(64),
-                transforms.ToTensor(),
-            ]))
-        trainloader_whitening = torch.utils.data.DataLoader(
-            trainset_whitening, batch_size=100, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True)
-
-    elif args.dataset == 'DTD':
+    if args.dataset == 'histology':
         trainset_whitening = None  # may take trainset_norandom from Dataloder.getloader()
         trainloader_whitening = trainloader_norandom
         stride = 1
+    else:
+        raise ValueError("Only histology dataset supported.")
 
     patches_mean, whitening_eigvecs, whitening_eigvals = utils.compute_whitening_from_loader(
         trainloader_whitening,
@@ -509,7 +373,8 @@ if not os.path.exists(whitening_file):
     del trainset_whitening
 
     # all objects are numpy arrays
-    np.savez(whitening_file, patches_mean=patches_mean,
+    np.savez(whitening_file,
+             patches_mean=patches_mean,
              whitening_eigvecs=whitening_eigvecs,
              whitening_eigvals=whitening_eigvals)
 
@@ -568,37 +433,10 @@ else:
     print('Selecting random patches from loader...')
     n_images_trainset = len(trainloader.dataset)
 
-    if args.dataset == 'cifar10':
-        trainset_select_patches = CIFAR10(root='./data', train=True,
-                                          download=True,
-                                          transform=transforms.ToTensor())
-        trainloader_select_patches = torch.utils.data.DataLoader(
-            trainset_select_patches, batch_size=args.batchsize,
-            shuffle=False, num_workers=args.num_workers)
-    elif args.dataset in ['imagenet32', 'imagenet64', 'imagenet128']:
-        trainset_select_patches = Imagenet32(args.path_train,
-                                             transform=transforms.ToTensor(),
-                                             sz=spatial_size,
-                                             n_arrays=n_arrays_train)
-        trainloader_select_patches = torch.utils.data.DataLoader(
-            trainset_select_patches, batch_size=args.batchsize, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True)
-    elif args.dataset in ['imagenet']:
-        stride = 2
-        spatial_size = 64
-        traindir = os.path.join(args.path, 'train')
-        trainset_select_patches = datasets.ImageFolder(
-            traindir,
-            transforms.Compose([
-                transforms.Resize(72),
-                transforms.CenterCrop(64),
-                transforms.ToTensor(),
-            ]))
-        trainloader_select_patches = torch.utils.data.DataLoader(
-            trainset_select_patches, batch_size=args.batchsize, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True)
-    elif args.dataset == 'DTD':
+    if args.dataset == 'histology':
         trainloader_select_patches = trainloader_norandom
+    else:
+        raise ValueError("Only dataset histology supported.")
 
     n_patches_per_rowcol = spatial_size - spatialsize_convolution + 1  # 20 - 4 + 1
     patches = utils.select_patches_from_loader(
@@ -684,6 +522,11 @@ out1, out2 = net(
 if args.feat_square:
     out1 = torch.cat([out1, out1 ** 2], dim=1)
     out2 = torch.cat([out2, out1 ** 2], dim=1)
+
+print(out1.size())
+print(out2.size())
+print("======================================0")
+exit()
 
 # Second convolution layer. This is optional and will only run if args.spatialsize_convolution_2 > 0
 net_2 = None
@@ -807,8 +650,7 @@ if args.normalize_net_outputs:
 
 def train(epoch):
     net.train()
-    batch_norm1, batch_norm2, batch_norm, \
-    classifier1, classifier2, classifier = classifier_blocks
+    batch_norm1, batch_norm2, batch_norm, classifier1, classifier2, classifier = classifier_blocks
     for bn in [batch_norm1, batch_norm2, batch_norm]:
         if bn is not None:
             bn.train()
@@ -1076,13 +918,13 @@ def compute_auc(pred_vec, truth_vec):  # for binary features
 
 def plot_roc_(y_pred, y_true, title="", mode=None, epoch=None):
     """
-    Take in two vectors (-1,) dimensional, with each item denoting the class that sample belongs to. 
-    The class labels are converted to one-hot vectors. 
+    Take in two vectors (-1,) dimensional, with each item denoting the class that sample belongs to.
+    The class labels are converted to one-hot vectors.
     The AUC-ROC is calculated for each class and plotted.
     :param y_pred: ndarray(int) : network prediction. e.g. [0,1,3,2,1,1,0]
     :param y_true: ndarray(int) : ground truth. e.g. [0,1,3,2,1,1,0]
     :param title: the plot title
-    :return: 
+    :return:
     """
     # converting y_pred and y_true to one-hot vectors
     enc = OneHotEncoder()
